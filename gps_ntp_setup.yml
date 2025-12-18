@@ -1,0 +1,77 @@
+---
+- name: Configure Raspberry Pi as Stratum 1 NTP Server
+  hosts: gps_servers
+  become: yes
+  tasks:
+
+    - name: Install GPS and Chrony packages
+      apt:
+        name:
+          - gpsd
+          - gpsd-clients
+          - pps-tools
+          - chrony
+        state: present
+        update_cache: yes
+
+    - name: Enable PPS GPIO overlay in config.txt
+      lineinfile:
+        path: /boot/firmware/config.txt
+        line: "dtoverlay=pps-gpio,gpiopin=18"
+        state: present
+      register: config_txt
+
+    - name: Add pps-gpio to kernel modules
+      lineinfile:
+        path: /etc/modules
+        line: "pps-gpio"
+        state: present
+
+    - name: Configure GPSD default settings
+      copy:
+        dest: /etc/default/gpsd
+        content: |
+          START_DAEMON="true"
+          USBAUTO="true"
+          DEVICES="/dev/ttyS0 /dev/pps0"
+          GPSD_OPTIONS="-n"
+
+    - name: Configure Chrony with GPS and PPS sources
+      blockinfile:
+        path: /etc/chrony/chrony.conf
+        marker: "# {mark} ANSIBLE MANAGED GPS BLOCK"
+        block: |
+          # NMEA from gpsd (SHM 0)
+          refclock SHM 0 refid NMEA offset 0.125 poll 4 noselect
+          # PPS Direct from Kernel
+          refclock PPS /dev/pps0 refid KPPS lock NMEA poll 4 prefer
+          
+          # Allow local network to sync from this server
+          server 192.168.10.123 iburst
+          allow 192.168.0.0/24
+          allow 192.168.10.0/24
+          allow 10.0.10.0/24
+
+    - name: Restart GPSD service
+      systemd:
+        name: gpsd
+        state: restarted
+        enabled: yes
+
+    - name: Restart Chrony service
+      systemd:
+        name: chrony
+        state: restarted
+        enabled: yes
+
+    - name: Disable serial console in cmdline.txt
+      replace:
+        path: /boot/firmware/cmdline.txt
+        regexp: 'console=serial0,\d+ '
+        replace: ''
+      notify: reboot
+
+    - name: Reboot if config.txt changed
+      reboot:
+      when: config_txt.changed
+
